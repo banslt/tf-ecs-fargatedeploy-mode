@@ -1,5 +1,5 @@
 variable "aws_region" {
-  default     = "us-east-1"
+  default     = "us-east-2"
 }
 
 variable "az_count" {
@@ -9,7 +9,12 @@ variable "az_count" {
 
 variable "app_image" {
   description = "Docker image to run in the ECS cluster"
-  default     = "440810850844.dkr.ecr.us-east-1.amazonaws.com/stresstestapp:latest"
+  default     = "189141687483.dkr.ecr.us-east-2.amazonaws.com/stresstestapp:latest"
+}
+
+variable "telegraf_image" {
+  description = "telegraf docker image to run in the ECS cluster"
+  default     = "189141687483.dkr.ecr.us-east-2.amazonaws.com/ba/telegraf-ecs:latest"
 }
 
 variable "app_port" {

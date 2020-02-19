@@ -94,7 +94,7 @@ resource "aws_appautoscaling_policy" "scale_up" {
 
 
 resource "aws_iam_role" "ecs-autoscale-role" {
-  name = "ecs-scale-${var.cluster_name}-${var.service_name}"
+  name = "ba-ecs-scale-${var.cluster_name}-${var.service_name}"
 
   assume_role_policy = <<EOF
 {

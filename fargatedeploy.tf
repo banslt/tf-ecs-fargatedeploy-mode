@@ -77,15 +77,22 @@ resource "aws_route_table_association" "private" {
 # ALB Security group
 # This is the group you need to edit if you want to restrict access to your application
 resource "aws_security_group" "lb" {
-  name        = "tf-ecs-alb"
+  name        = "ba-ecs-alb"
   description = "controls access to the ALB"
   vpc_id      = "${aws_vpc.main.id}"
 
   ingress {
-    protocol    = "tcp"
-    from_port   = 3100
-    to_port     = 3100
-    cidr_blocks = ["0.0.0.0/0"]
+    protocol    = "TCP"
+    from_port   = "${var.app_port}"
+    to_port     = "${var.app_port}"
+    cidr_blocks = ["95.141.100.184/32"]
+  }
+
+  ingress {
+    protocol    = "TCP"
+    from_port   = 8086
+    to_port     = 8086
+    cidr_blocks = ["3.214.246.38/32"]
   }
 
   egress {
@@ -96,14 +103,35 @@ resource "aws_security_group" "lb" {
   }
 }
 
-# Traffic to the ECS Cluster should only come from the ALB
+#Allow inbound access from the ALB only for telegraf
+resource "aws_security_group" "ecs_public_sg" {
+  name        = "ecs_telegraf"
+  description = "Allow telegraf ecs inbound traffic"
+  vpc_id      = "${aws_vpc.main.id}"
+
+  ingress {
+    from_port       = 8086
+    to_port         = 8086
+    protocol        = "TCP"
+    security_groups = ["${aws_security_group.lb.id}"]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+#Allow inbound access from the ALB only for the service
 resource "aws_security_group" "ecs_tasks" {
-  name        = "tf-ecs-tasks"
+  name        = "ba-ecs-tasks"
   description = "allow inbound access from the ALB only"
   vpc_id      = "${aws_vpc.main.id}"
 
   ingress {
-    protocol        = "tcp"
+    protocol        = "TCP"
     from_port       = "${var.app_port}"
     to_port         = "${var.app_port}"
     security_groups = ["${aws_security_group.lb.id}"]
@@ -120,7 +148,7 @@ resource "aws_security_group" "ecs_tasks" {
 ### ALB
 
 resource "aws_alb" "main" {
-  name            = "tf-ecs-alb"
+  name            = "ba-ecs-alb"
   subnets         = flatten([aws_subnet.public.*.id])
   security_groups = ["${aws_security_group.lb.id}"]
   depends_on = [
@@ -130,8 +158,16 @@ resource "aws_alb" "main" {
 }
 
 resource "aws_alb_target_group" "app" {
-  name        = "tf-alb"
+  name        = "ba-tg-stressapp"
   port        = 3100
+  protocol    = "HTTP"
+  vpc_id      = "${aws_vpc.main.id}"
+  target_type = "ip"
+}
+
+resource "aws_alb_target_group" "telegraf" {
+  name        = "ba-tg-telegraf"
+  port        = 8086
   protocol    = "HTTP"
   vpc_id      = "${aws_vpc.main.id}"
   target_type = "ip"
@@ -149,6 +185,7 @@ resource "aws_alb_listener" "front_end" {
   }
 }
 
+
 #EXECUTION ROLE
 data "aws_iam_role" "ecs_task_execution_role" {
   name = "ecsTaskExecutionRole"
@@ -157,15 +194,15 @@ data "aws_iam_role" "ecs_task_execution_role" {
 ### ECS
 
 resource "aws_ecs_cluster" "main" {
-  name = "hab"
+  name = "ba-ecs-cluster"
 }
 
 resource "aws_ecs_task_definition" "app" {
   family                   = "stresstestapp"
   network_mode             = "awsvpc"
   requires_compatibilities = ["FARGATE"]
-  cpu                      = "${var.fargate_cpu}"
-  memory                   = "${var.fargate_memory}"
+  cpu                      = "512"
+  memory                   = "1024"
   execution_role_arn       = "${data.aws_iam_role.ecs_task_execution_role.arn}"
 
   container_definitions = <<DEFINITION
@@ -182,7 +219,21 @@ resource "aws_ecs_task_definition" "app" {
         "hostPort": ${var.app_port}
       }
     ]
+  },
+  {
+    "cpu": ${var.fargate_cpu},
+    "image": "${var.telegraf_image}",
+    "memory": ${var.fargate_memory},
+    "name": "telegraf",
+    "networkMode": "awsvpc",
+    "portMappings": [
+      {
+        "containerPort": 8086,
+        "hostPort": 8086
+      }
+    ]
   }
+
 ]
 DEFINITION
 }
@@ -195,7 +246,11 @@ resource "aws_ecs_service" "main" {
   launch_type     = "FARGATE"
 
   network_configuration {
-    security_groups = ["${aws_security_group.ecs_tasks.id}"]
+    security_groups = [
+                  "${aws_security_group.ecs_tasks.id}",
+                  "${aws_security_group.ecs_public_sg.id}"
+                      ]
+    
     subnets         = flatten([aws_subnet.private.*.id])
   }
 
@@ -215,8 +270,8 @@ resource "aws_ecs_service" "main" {
 
 module "svc-scaling" {
   source          = "./modules/svc-scaling"
-  cluster_name    = "hab"
-  service_name    = "stresstestapp"
+  cluster_name    = "${aws_ecs_cluster.main.name}"
+  service_name    = "${aws_ecs_service.main.name}"
   alarm_name      = "ba_cpu_stressapp"
   scale_policy_name_prefix = "ba_stressapp"
 }
