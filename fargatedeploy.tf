@@ -2,13 +2,71 @@ provider "aws" {
   region     = "${var.aws_region}"
 }
 
+### Peering cluster VPC with the master VPC 
+provider "aws" {
+  alias  = "master"
+  region     = "${var.aws_region}"
+}
+
+data "aws_vpc" "master" {
+  cidr_block = "172.22.0.0/16"
+}
+
+data "aws_caller_identity" "master" {
+  provider = "aws.master"
+}
+
+# Requester's side of the connection.
+resource "aws_vpc_peering_connection" "master" {
+  vpc_id        = "${aws_vpc.main.id}"
+  peer_vpc_id   = "${data.aws_vpc.master.id}"
+  peer_owner_id = "${data.aws_caller_identity.master.account_id}"
+  peer_region   = "${var.aws_region}"
+  auto_accept   = false
+}
+
+# Accepter's side of the connection.
+resource "aws_vpc_peering_connection_accepter" "master" {
+  provider                  = "aws.master"
+  vpc_peering_connection_id = "${aws_vpc_peering_connection.master.id}"
+  auto_accept               = true
+}
+
+# Creating routes between vpc
+data "aws_route_tables" "main" {
+  vpc_id= "${aws_vpc.main.id}"
+  depends_on = [aws_route_table.private ]
+}
+
+data "aws_route_tables" "master" {
+  provider    = "aws.master"
+  vpc_id      = "${data.aws_vpc.master.id}"
+}
+
+resource "aws_route" "main_to_master" {
+  count                     = "3"
+  route_table_id            = "${flatten(data.aws_route_tables.main.ids)[count.index]}"
+  destination_cidr_block    = "${data.aws_vpc.master.cidr_block}"
+  vpc_peering_connection_id = "${aws_vpc_peering_connection.master.id}"
+  
+}
+
+resource "aws_route" "master_to_main" {
+  provider                  = "aws.master"
+  count                     = "${length(data.aws_route_tables.master.ids)}"
+  route_table_id            = "${flatten(data.aws_route_tables.master.ids)[count.index]}"
+  destination_cidr_block    = "${aws_vpc.main.cidr_block}"
+  vpc_peering_connection_id = "${aws_vpc_peering_connection.master.id}"
+  depends_on                = [ aws_vpc_peering_connection.master ]
+}
+
 ### Network
 
 # Fetch AZs in the current region
 data "aws_availability_zones" "available" {}
 
 resource "aws_vpc" "main" {
-  cidr_block = "147.14.0.0/16"
+  cidr_block = "172.20.0.0/16"
 }
 
 # Create var.az_count private subnets, each in a different AZ
@@ -74,6 +132,7 @@ resource "aws_route_table_association" "private" {
 
 ### Security
 
+
 # ALB Security group
 # This is the group you need to edit if you want to restrict access to your application
 resource "aws_security_group" "lb" {
@@ -82,17 +141,17 @@ resource "aws_security_group" "lb" {
   vpc_id      = "${aws_vpc.main.id}"
 
   ingress {
-    protocol    = "TCP"
-    from_port   = "${var.app_port}"
-    to_port     = "${var.app_port}"
-    cidr_blocks = ["95.141.100.184/32"]
+    protocol    = "-1"
+    from_port   = 0
+    to_port     = 0
+    security_groups = ["sg-04829d010be21b594"] # Allow communication with traffic gen on main instance
   }
 
   ingress {
-    protocol    = "TCP"
-    from_port   = 8086
-    to_port     = 8086
-    cidr_blocks = ["3.214.246.38/32"]
+    protocol    = "-1"
+    from_port   = 0
+    to_port     = 0
+    security_groups = ["sg-0e6590742913d2fca"] # Allow influxDB queries on monitoring instance
   }
 
   egress {
@@ -101,6 +160,7 @@ resource "aws_security_group" "lb" {
     protocol  = "-1"
     cidr_blocks = ["0.0.0.0/0"]
   }
+  depends_on = [ aws_vpc_peering_connection_accepter.master ]
 }
 
 #Allow inbound access from the ALB only for telegraf
@@ -145,6 +205,39 @@ resource "aws_security_group" "ecs_tasks" {
   }
 }
 
+# Allow monitoring instance inbound access for influxdb queries and telegraf
+resource "aws_security_group_rule" "monitoring_a" {
+  security_group_id = "sg-0e6590742913d2fca"
+  type            = "ingress"
+  from_port       = 8086
+  to_port         = 8086
+  protocol        = "tcp"
+  source_security_group_id = "${aws_security_group.lb.id}"
+}
+resource "aws_security_group_rule" "monitoring_b" {
+  security_group_id = "sg-0e6590742913d2fca"
+  type            = "ingress"
+  from_port       = 8186
+  to_port         = 8186
+  protocol        = "tcp"
+  source_security_group_id = "${aws_security_group.lb.id}"
+}
+resource "aws_security_group_rule" "monitoring_c" {
+  security_group_id = "sg-0e6590742913d2fca"
+  type            = "ingress"
+  from_port       = 8086
+  to_port         = 8086
+  protocol        = "tcp"
+  source_security_group_id = "${aws_security_group.ecs_tasks.id}"
+}
+resource "aws_security_group_rule" "monitoring_d" {
+  security_group_id = "sg-0e6590742913d2fca"
+  type            = "ingress"
+  from_port       = 8186
+  to_port         = 8186
+  protocol        = "tcp"
+  source_security_group_id = "${aws_security_group.ecs_tasks.id}"
+}
 ### ALB
 
 resource "aws_alb" "main" {
