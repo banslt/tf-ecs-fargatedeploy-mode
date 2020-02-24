@@ -7,44 +7,48 @@ provider "aws" {
 # Fetch AZs in the current region
 data "aws_availability_zones" "available" {}
 
-resource "aws_vpc" "main" {
-  cidr_block = "147.14.0.0/16"
+data "aws_vpc" "main" {
+  cidr_block = "172.22.0.0/16"
 }
 
 # Create var.az_count private subnets, each in a different AZ
 resource "aws_subnet" "private" {
   count             = "${var.az_count}"
-  cidr_block        = "${cidrsubnet(aws_vpc.main.cidr_block, 8, count.index)}"
+  cidr_block        = "${cidrsubnet(data.aws_vpc.main.cidr_block, 8, count.index+1)}"
   availability_zone = "${data.aws_availability_zones.available.names[count.index]}"
-  vpc_id            = "${aws_vpc.main.id}"
+  vpc_id            = "${data.aws_vpc.main.id}"
 }
 
 # Create var.az_count public subnets, each in a different AZ
 resource "aws_subnet" "public" {
   count                   = "${var.az_count}"
-  cidr_block              = "${cidrsubnet(aws_vpc.main.cidr_block, 8, var.az_count + count.index)}"
+  cidr_block              = "${cidrsubnet(data.aws_vpc.main.cidr_block, 8, var.az_count + count.index+1)}"
   availability_zone       = "${data.aws_availability_zones.available.names[count.index]}"
-  vpc_id                  = "${aws_vpc.main.id}"
+  vpc_id                  = "${data.aws_vpc.main.id}"
   map_public_ip_on_launch = true
 }
 
+
 # IGW for the public subnet
-resource "aws_internet_gateway" "gw" {
-  vpc_id = "${aws_vpc.main.id}"
+data "aws_internet_gateway" "gw" {
+  filter {
+    name   = "attachment.vpc-id"
+    values = ["${data.aws_vpc.main.id}"]
+  }
 }
 
 # Route the public subnet traffic through the IGW
 resource "aws_route" "internet_access" {
-  route_table_id         = "${aws_vpc.main.main_route_table_id}"
+  route_table_id         = "${data.aws_vpc.main.main_route_table_id}"
   destination_cidr_block = "0.0.0.0/0"
-  gateway_id             = "${aws_internet_gateway.gw.id}"
+  gateway_id             = "${data.aws_internet_gateway.gw.id}"
 }
 
 # Create a NAT gateway with an EIP for each private subnet to get internet connectivity
 resource "aws_eip" "gw" {
   count      = "${var.az_count}"
   vpc        = true
-  depends_on = [aws_internet_gateway.gw]
+  depends_on = [data.aws_internet_gateway.gw]
 }
 
 resource "aws_nat_gateway" "gw" {
@@ -57,7 +61,7 @@ resource "aws_nat_gateway" "gw" {
 # And make it route non-local traffic through the NAT gateway to the internet
 resource "aws_route_table" "private" {
   count  = "${var.az_count}"
-  vpc_id = "${aws_vpc.main.id}"
+  vpc_id = "${data.aws_vpc.main.id}"
 
   route {
     cidr_block = "0.0.0.0/0"
@@ -74,25 +78,38 @@ resource "aws_route_table_association" "private" {
 
 ### Security
 
+data "aws_instance" "trafficgen" {
+ filter {
+    name   = "tag:Name"
+    values = ["ba_ecsdeploy"]
+  }
+}
+data "aws_instance" "monitoring" {
+ filter {
+    name   = "tag:Name"
+    values = ["ba-ecsmonitoring"]
+  }
+}
+
 # ALB Security group
 # This is the group you need to edit if you want to restrict access to your application
 resource "aws_security_group" "lb" {
   name        = "ba-ecs-alb"
   description = "controls access to the ALB"
-  vpc_id      = "${aws_vpc.main.id}"
+  vpc_id      = "${data.aws_vpc.main.id}"
 
   ingress {
     protocol    = "TCP"
     from_port   = "${var.app_port}"
     to_port     = "${var.app_port}"
-    cidr_blocks = ["95.141.100.184/32"]
+    cidr_blocks = ["${data.aws_instance.trafficgen.public_ip}/32"]
   }
 
   ingress {
     protocol    = "TCP"
     from_port   = 8086
     to_port     = 8086
-    cidr_blocks = ["3.214.246.38/32"]
+    cidr_blocks = ["${data.aws_instance.monitoring.public_ip}/32"]
   }
 
   egress {
@@ -107,13 +124,20 @@ resource "aws_security_group" "lb" {
 resource "aws_security_group" "ecs_public_sg" {
   name        = "ecs_telegraf"
   description = "Allow telegraf ecs inbound traffic"
-  vpc_id      = "${aws_vpc.main.id}"
+  vpc_id      = "${data.aws_vpc.main.id}"
 
   ingress {
     from_port       = 8086
     to_port         = 8086
     protocol        = "TCP"
-    security_groups = ["${aws_security_group.lb.id}"]
+    cidr_blocks = ["${data.aws_instance.monitoring.public_ip}/32"]  
+  }
+  
+  ingress {
+    from_port       = 8086
+    to_port         = 8086
+    protocol        = "TCP"
+    security_groups = ["${aws_security_group.lb.id}"]  
   }
 
   egress {
@@ -128,7 +152,7 @@ resource "aws_security_group" "ecs_public_sg" {
 resource "aws_security_group" "ecs_tasks" {
   name        = "ba-ecs-tasks"
   description = "allow inbound access from the ALB only"
-  vpc_id      = "${aws_vpc.main.id}"
+  vpc_id      = "${data.aws_vpc.main.id}"
 
   ingress {
     protocol        = "TCP"
@@ -161,7 +185,7 @@ resource "aws_alb_target_group" "app" {
   name        = "ba-tg-stressapp"
   port        = 3100
   protocol    = "HTTP"
-  vpc_id      = "${aws_vpc.main.id}"
+  vpc_id      = "${data.aws_vpc.main.id}"
   target_type = "ip"
 }
 
@@ -169,7 +193,7 @@ resource "aws_alb_target_group" "telegraf" {
   name        = "ba-tg-telegraf"
   port        = 8086
   protocol    = "HTTP"
-  vpc_id      = "${aws_vpc.main.id}"
+  vpc_id      = "${data.aws_vpc.main.id}"
   target_type = "ip"
 }
 
@@ -217,6 +241,10 @@ resource "aws_ecs_task_definition" "app" {
       {
         "containerPort": ${var.app_port},
         "hostPort": ${var.app_port}
+      },
+      {
+        "containerPort": 8186,
+        "hostPort": 8186
       }
     ]
   },
@@ -251,7 +279,7 @@ resource "aws_ecs_service" "main" {
                   "${aws_security_group.ecs_public_sg.id}"
                       ]
     
-    subnets         = flatten([aws_subnet.private.*.id])
+    subnets         = concat(flatten([aws_subnet.private.*.id]),flatten([aws_subnet.public.*.id]))
   }
 
   load_balancer {
