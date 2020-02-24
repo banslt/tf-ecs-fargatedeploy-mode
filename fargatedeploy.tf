@@ -132,6 +132,18 @@ resource "aws_route_table_association" "private" {
 
 ### Security
 
+data "aws_instance" "trafficgen" {
+ filter {
+    name   = "tag:Name"
+    values = ["ba_ecsdeploy"]
+  }
+}
+data "aws_instance" "monitoring" {
+ filter {
+    name   = "tag:Name"
+    values = ["ba-ecsmonitoring"]
+  }
+}
 
 # ALB Security group
 # This is the group you need to edit if you want to restrict access to your application
@@ -141,17 +153,17 @@ resource "aws_security_group" "lb" {
   vpc_id      = "${aws_vpc.main.id}"
 
   ingress {
-    protocol    = "-1"
-    from_port   = 0
-    to_port     = 0
-    security_groups = ["sg-04829d010be21b594"] # Allow communication with traffic gen on main instance
+    protocol    = "TCP"
+    from_port   = "${var.app_port}"
+    to_port     = "${var.app_port}"
+    cidr_blocks = ["${data.aws_instance.trafficgen.public_ip}/32"] # Allow communication with traffic gen on main instance
   }
 
   ingress {
-    protocol    = "-1"
-    from_port   = 0
-    to_port     = 0
-    security_groups = ["sg-0e6590742913d2fca"] # Allow influxDB queries on monitoring instance
+    protocol    = "TCP"
+    from_port   = 8086
+    to_port     = 8086
+    cidr_blocks = ["${data.aws_instance.monitoring.public_ip}/32"] # Allow influxDB queries on monitoring instance
   }
 
   egress {
@@ -310,6 +322,10 @@ resource "aws_ecs_task_definition" "app" {
       {
         "containerPort": ${var.app_port},
         "hostPort": ${var.app_port}
+      },
+      {
+        "containerPort": 8186,
+        "hostPort": 8186
       }
     ]
   },
