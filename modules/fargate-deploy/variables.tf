@@ -36,3 +36,11 @@ variable "fargate_memory" {
   description = "Fargate instance memory to provision (in MiB)"
   default     = "512"
 }
+
+variable "min_capacity" {
+  default = "1"
+}
+
+variable "max_capacity" {
+  default = "50"
+}
